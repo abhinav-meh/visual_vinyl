@@ -35,7 +35,6 @@ def read_color_stream():
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
-            # Only emit when it changes
             if color != last_color:
                 last_color = color
                 yield color
