@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import mido
 import time
-from frame_mask import apply_circle_mask
+from frame_mask import apply_circle_mask  # still used for nice circular preview/debug
 
 COLOR_BUCKETS = {
     "Red":    [(0, 10), (170, 179)],
@@ -21,7 +21,6 @@ def _hue_in_ranges(h, ranges):
     return m
 
 def detect_top_colors(frame, mask, min_sv=(50, 50), top_k=2):
-
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     pixels = hsv[mask == 255]
     if pixels.size == 0:
@@ -48,7 +47,6 @@ def detect_top_colors(frame, mask, min_sv=(50, 50), top_k=2):
     return scores[:top_k]
 
 def classify_color_or_chord(top, chord_min=0.25, dominance_gap=0.18):
-
     if not top:
         return None, None
 
@@ -76,7 +74,6 @@ COLOR_TO_NOTE = {
     "Purple": 71,  # B4
 }
 
-
 PAIR_TO_CHORD = {
     ("Red", "Blue"):   [60, 64, 67],  # C major
     ("Blue", "Green"): [57, 60, 64],  # A minor
@@ -97,13 +94,37 @@ def get_notes(event_type, value):
 
     return []
 
-def note_on(out, notes, vel=90):
-    for n in notes:
-        out.send(mido.Message("note_on", note=int(n), velocity=int(vel)))
+def make_ring_masks(h, w, center=None, ring_specs=None):
 
-def note_off(out, notes):
+    if center is None:
+        center = (w // 2, h // 2)
+
+    if ring_specs is None:
+        R = min(w, h) // 2
+        ring_specs = [
+            (int(R * 0.10), int(R * 0.25)),  # inner ring
+            (int(R * 0.28), int(R * 0.45)),  # middle ring
+            (int(R * 0.48), int(R * 0.68)),  # outer ring
+        ]
+
+    masks = []
+    for r_in, r_out in ring_specs:
+        outer = np.zeros((h, w), dtype=np.uint8)
+        inner = np.zeros((h, w), dtype=np.uint8)
+        cv2.circle(outer, center, r_out, 255, -1)
+        cv2.circle(inner, center, r_in, 255, -1)
+        ring = cv2.bitwise_and(outer, cv2.bitwise_not(inner))
+        masks.append(ring)
+
+    return masks, ring_specs
+
+def note_on(out, notes, vel=90, channel=0):
     for n in notes:
-        out.send(mido.Message("note_off", note=int(n), velocity=0))
+        out.send(mido.Message("note_on", note=int(n), velocity=int(vel), channel=int(channel)))
+
+def note_off(out, notes, channel=0):
+    for n in notes:
+        out.send(mido.Message("note_off", note=int(n), velocity=0, channel=int(channel)))
 
 def pick_output_port(prefer="IAC"):
     outs = mido.get_output_names()
@@ -114,6 +135,9 @@ def pick_output_port(prefer="IAC"):
             return name
     return outs[0]
 
+def transpose(notes, semitones):
+    return [int(n + semitones) for n in notes]
+
 def main():
     port = pick_output_port("IAC")
     print("Using MIDI output:", port)
@@ -123,8 +147,11 @@ def main():
     if not cap.isOpened():
         raise RuntimeError("Could not open webcam")
 
-    last_signature = None
-    last_notes = []
+    last_signature = [None, None, None]
+    last_notes = [[], [], []]
+
+    ring_channels = [0, 1, 2]        # inner=bass, middle=synth, outer=beat
+    ring_transpose = [-12, 0, 0]     # inner ring one octave down
 
     try:
         while True:
@@ -132,50 +159,53 @@ def main():
             if not ret:
                 continue
 
-            masked_frame, mask = apply_circle_mask(frame)
+            h, w = frame.shape[:2]
+            center = (w // 2, h // 2)
 
-            top = detect_top_colors(frame, mask, min_sv=(50, 50), top_k=2)
-            event_type, value = classify_color_or_chord(top, chord_min=0.25, dominance_gap=0.18)
+            masked_frame, _circle_mask = apply_circle_mask(frame)
+
+            ring_masks, ring_specs = make_ring_masks(h, w, center=center)
 
             debug = masked_frame.copy()
-            if top:
-                txt = " | ".join([f"{c}:{p:.2f}" for c, p in top])
-            else:
-                txt = "No color (too dark/gray)"
-            cv2.putText(debug, txt, (20, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
 
-            if event_type == "SINGLE":
-                cv2.putText(debug, f"SINGLE: {value}", (20, 60),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
-            elif event_type == "CHORD":
-                cv2.putText(debug, f"CHORD: {value[0]} + {value[1]}", (20, 60),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
-            else:
-                cv2.putText(debug, "Uncertain", (20, 60),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+            for i in range(3):
+                top = detect_top_colors(frame, ring_masks[i], min_sv=(50, 50), top_k=2)
+                event_type, value = classify_color_or_chord(top, chord_min=0.25, dominance_gap=0.18)
 
-            cv2.imshow("Visual Vinyl", debug)
+                r_in, r_out = ring_specs[i]
+                cv2.circle(debug, center, r_in, (255, 255, 255), 1)
+                cv2.circle(debug, center, r_out, (255, 255, 255), 1)
+
+                label = ["Inner", "Middle", "Outer"][i]
+                txt = " | ".join([f"{c}:{p:.2f}" for c, p in top]) if top else "No color"
+                cv2.putText(debug, f"{label}: {txt}", (20, 30 + i * 25),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+                signature = (event_type, value)
+
+                if event_type is not None and signature != last_signature[i]:
+                    if last_notes[i]:
+                        note_off(out, last_notes[i], channel=ring_channels[i])
+
+                    notes = get_notes(event_type, value)
+                    notes = transpose(notes, ring_transpose[i])
+
+                    note_on(out, notes, vel=90, channel=ring_channels[i])
+
+                    last_notes[i] = notes
+                    last_signature[i] = signature
+
+            cv2.imshow("Visual Vinyl - 3 Rings (MIDI)", debug)
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
-            signature = (event_type, value)
-            if event_type is not None and signature != last_signature:
-                if last_notes:
-                    note_off(out, last_notes)
-
-                notes = get_notes(event_type, value)
-                note_on(out, notes, vel=90)
-
-                last_notes = notes
-                last_signature = signature
-
             time.sleep(0.01)
 
     finally:
-        if last_notes:
-            note_off(out, last_notes)
+        for i in range(3):
+            if last_notes[i]:
+                note_off(out, last_notes[i], channel=ring_channels[i])
         cap.release()
         cv2.destroyAllWindows()
         out.close()
