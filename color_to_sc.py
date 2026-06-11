@@ -7,8 +7,8 @@ from frame_mask import apply_circle_mask
 # ---- OSC client to SuperCollider ----
 sc = SimpleUDPClient("127.0.0.1", 57120)
 
-def sc_note_on(note: int, vel: float = 0.7):
-    sc.send_message("/noteOn", [int(note), float(vel)])
+def sc_note_on(note: int, vel: float = 0.7, ring: int = 0):
+    sc.send_message("/noteOn", [int(note), float(vel), int(ring)])
 
 def sc_note_off(note: int):
     sc.send_message("/noteOff", [int(note)])
@@ -58,7 +58,6 @@ def top_colors(frame, mask, min_sv=(50, 50), top_k=2):
         if count:
             ratio = count / total
 
-            # ignore small noisy colors
             if ratio > 0.08:
                 scores.append((name, ratio))
 
@@ -120,12 +119,11 @@ def notes_for(event_type, value):
 
 def main():
 
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
 
     if not cap.isOpened():
         raise RuntimeError("Could not open webcam")
 
-    # reduce CPU load
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 
@@ -158,7 +156,6 @@ def main():
 
             sig = (event_type, value)
 
-            # temporal smoothing
             if sig == stable_sig:
                 stable_count += 1
             else:
@@ -181,12 +178,22 @@ def main():
 
                 new_notes = notes_for(event_type, value)
 
-                for n in new_notes:
-                    sc_note_on(n, vel=0.7)
+                if event_type == "SINGLE":
+                    for n in new_notes:
+                        sc_note_on(n, vel=0.7, ring=0)
+
+                elif event_type == "CHORD":
+                    for i, n in enumerate(new_notes):
+                        sc_note_on(n, vel=0.7, ring=i % 3)
 
                 last_notes = new_notes
                 last_sig = sig
                 last_trigger_time = now
+
+            cv2.imshow("mask", mask)
+
+            if cv2.waitKey(1) & 0xFF == 27:
+                break
 
             time.sleep(0.01)
 
@@ -194,6 +201,7 @@ def main():
 
         sc_all_off()
         cap.release()
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
