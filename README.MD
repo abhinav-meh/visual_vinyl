@@ -2,7 +2,7 @@
 
 An interactive musical instrument inspired by synesthesia, vinyl records, and tangible interfaces.
 
-![Visual Vinyl](/IMG_6513.jpg)
+![Visual Vinyl](./IMG_6513.jpg)
 
 ## Overview
 
